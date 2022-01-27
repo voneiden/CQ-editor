@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from OCP.XCAFPrs import XCAFPrs_AISObject
 from OCP.TopoDS import TopoDS_Shape
 from OCP.AIS import AIS_Shape, AIS_ColoredShape
+from OCP.Aspect import Aspect_TypeOfLine
+from OCP.Prs3d import Prs3d_LineAspect
 from OCP.Quantity import \
     Quantity_TOC_RGB as TOC_RGB, Quantity_Color
     
@@ -63,7 +65,15 @@ def make_AIS(obj : Union[cq.Workplane, List[cq.Workplane], cq.Shape, List[cq.Sha
     else:
         shape = to_compound(obj)
         ais = AIS_ColoredShape(shape.wrapped)
-   
+
+    if 'aspect' in options:
+        ais.Attributes().SetWireAspect(
+            Prs3d_LineAspect(
+                to_occ_color('red'),
+                Aspect_TypeOfLine(options['aspect']),
+                options.get('aspect_width', 1.0)
+            )
+        )
     if 'alpha' in options:
         ais.SetTransparency(options['alpha'])
     if 'color' in options:
