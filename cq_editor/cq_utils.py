@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import cadquery as cq
 from cadquery.occ_impl.assembly import toCAF
 
@@ -81,6 +83,34 @@ def make_AIS(obj : Union[cq.Workplane, List[cq.Workplane], cq.Shape, List[cq.Sha
         set_transparency(ais, a)
 
     return ais,shape
+
+def is_assembly(shape):
+    return isinstance(shape, cq.Assembly)
+
+def assembly_to_shape_tree(assy: cq.Assembly):
+    tree = []
+
+    def walk(_assy: cq.Assembly, node: list):
+        for sub_assy in _assy.children:
+            sub_assy_name = sub_assy.name
+            sub_shape = sub_assy.shapes[0]
+            sub_shape.locate(sub_assy.loc)
+            opts = {}
+            if sub_assy.color:
+                opts['rgba'] = list(sub_assy.color.toTuple())
+                opts['rgba'][3] = 1 - opts['rgba'][3]
+            sub_ais, sub_shape_display = make_AIS(sub_shape, opts)
+            sub_data = {
+                "name": sub_assy_name,
+                "shape": sub_shape,
+                "shape_display": sub_shape_display,
+                "ais": sub_ais,
+                "branches": []
+            }
+            node.append(sub_data)
+            walk(sub_assy, sub_data["branches"])
+    walk(assy, tree)
+    return tree
 
 def export(obj : Union[cq.Workplane, List[cq.Workplane]], type : str,
            file, precision=1e-1):

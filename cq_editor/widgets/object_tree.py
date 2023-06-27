@@ -1,5 +1,6 @@
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem, QAction, QMenu, QWidget, QAbstractItemView
 from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal
+from cadquery.occ_impl.assembly import AssemblyProtocol
 
 from pyqtgraph.parametertree import Parameter, ParameterTree
 
@@ -9,7 +10,7 @@ from OCP.gp import gp_Dir, gp_Pnt, gp_Ax1
 
 from ..mixins import ComponentMixin
 from ..icons import icon
-from ..cq_utils import make_AIS, export, to_occ_color, is_obj_empty, get_occ_color, set_color
+from ..cq_utils import assembly_to_shape_tree, make_AIS, export, to_occ_color, is_assembly, is_obj_empty, get_occ_color, set_color
 from .viewer import DEFAULT_FACE_COLOR
 from ..utils import splitter, layout, get_save_filename
 
@@ -73,11 +74,46 @@ class ObjectTreeItem(QTreeWidgetItem):
         if self.sig:
             self.sig.emit()
 
+class GroupTreeItem(QTreeWidgetItem):
+    props = [
+        {'name': 'Name', 'type': 'str', 'value': ''},
+        {'name': 'Visible', 'type': 'bool', 'value': True}
+    ]
+
+    def __init__(self,
+                 name,
+                 **kwargs):
+
+        super().__init__([name], **kwargs)
+        self.setFlags( self.flags() | Qt.ItemIsUserCheckable)
+        self.setCheckState(0,Qt.Checked)
+
+        self.properties = Parameter.create(name='Properties', children=self.props)
+
+        self.properties['Name'] = name
+
+    def propertiesChanged(self, properties, changed):
+        self.setData(0,0,self.properties['Name'])
+
+        if self.properties['Visible']:
+            self.setCheckState(0, Qt.Checked)
+        else:
+            self.setCheckState(0, Qt.Unchecked)
+
+        if self.sig:
+            self.sig.emit()
+
 class CQRootItem(TopTreeItem):
 
     def __init__(self,*args,**kwargs):
 
         super(CQRootItem,self).__init__(['CQ models'],*args,**kwargs)
+
+
+def take_children_recursively(item):
+    children = item.takeChildren()
+    grandchild_groups = [take_children_recursively(child) for child in children]
+    return children + [grandchild for grandchild_group in grandchild_groups for grandchild in grandchild_group]
 
 
 class HelpersRootItem(TopTreeItem):
@@ -113,7 +149,7 @@ class ObjectTree(QWidget,ComponentMixin):
         self.properties_editor = ParameterTree(self)
 
         tree.setHeaderHidden(True)
-        tree.setItemsExpandable(False)
+        tree.setItemsExpandable(True)
         tree.setRootIsDecorated(False)
         tree.setContextMenuPolicy(Qt.ActionsContextMenu)
 
@@ -253,6 +289,31 @@ class ObjectTree(QWidget,ComponentMixin):
         objects_f = {k:v for k,v in objects.items() if not is_obj_empty(v.shape)}
 
         for name,obj in objects_f.items():
+            print(is_assembly(obj.shape), obj.options)
+            if is_assembly(obj.shape) and obj.options.get('parts'):
+                assembly_root = GroupTreeItem(name)
+                root.addChild(assembly_root)
+                assembly_tree = assembly_to_shape_tree(obj.shape)
+
+                def display_tree(items: list, parent_node: QTreeWidgetItem):
+                    for item in items:
+                        branches = item.pop('branches', [])
+                        node = ObjectTreeItem(
+                            **item,
+                            sig=self.sigObjectPropertiesChanged
+                        )
+                        if preserve_props and item.get("name") in current_props:
+                            self._restore_properties(item, current_props)
+                        if node.properties['Visible']:
+                            ais_list.append(item["ais"])
+                        parent_node.addChild(node)
+                        if branches:
+                            display_tree(branches, node)
+
+                display_tree(assembly_tree, assembly_root)
+                continue
+
+
             ais,shape_display = make_AIS(obj.shape,obj.options)
             
             child = ObjectTreeItem(name,
@@ -260,7 +321,7 @@ class ObjectTree(QWidget,ComponentMixin):
                                    shape_display=shape_display,
                                    ais=ais,
                                    sig=self.sigObjectPropertiesChanged)
-            
+
             if preserve_props and name in current_props:
                 self._restore_properties(child,current_props)
             
@@ -268,6 +329,7 @@ class ObjectTree(QWidget,ComponentMixin):
                 ais_list.append(ais)
             
             root.addChild(child)
+            root.setExpanded(True)
 
         if request_fit_view:
             self.sigObjectsAdded[list,bool].emit(ais_list,True)
@@ -292,19 +354,19 @@ class ObjectTree(QWidget,ComponentMixin):
     @pyqtSlot(list)
     @pyqtSlot()
     def removeObjects(self,objects=None):
-
+        print("OBJECTS TO REMOVE", objects)
         if objects:
             removed_items_ais = [self.CQ.takeChild(i).ais for i in objects]
         else:
-            removed_items_ais = [ch.ais for ch in self.CQ.takeChildren()]
-
+            removed_items_ais = [ch.ais for ch in take_children_recursively(self.CQ) if hasattr(ch, "ais")]
+        print("Removed objects", removed_items_ais)
         self.sigObjectsRemoved.emit(removed_items_ais)
 
     @pyqtSlot(bool)
     def stashObjects(self,action : bool):
 
         if action:
-            self._stash = self.CQ.takeChildren()
+            self._stash = take_children_recursively(self.CQ)
             removed_items_ais = [ch.ais for ch in self._stash]
             self.sigObjectsRemoved.emit(removed_items_ais)
         else:
@@ -384,7 +446,6 @@ class ObjectTree(QWidget,ComponentMixin):
 
     @pyqtSlot(QTreeWidgetItem,int)
     def handleChecked(self,item,col):
-
         if type(item) is ObjectTreeItem:
             if item.checkState(0):
                 item.properties['Visible'] = True
